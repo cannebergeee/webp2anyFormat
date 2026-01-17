@@ -1,0 +1,349 @@
+import os
+import shutil
+import threading
+import tkinter as tk
+import platform  # 新增：用于判断操作系统
+import subprocess # 新增：用于在Mac/Linux执行命令
+from tkinter import filedialog, messagebox, scrolledtext
+
+# --- 0. 核心依赖检查 (Pillow) ---
+try:
+    from PIL import Image, ImageTk, ImageSequence
+except ImportError:
+    # Mac下通常使用 pip3
+    messagebox.showerror("缺少依赖", "请安装 Pillow 库:\npip3 install Pillow")
+    exit()
+
+# --- 1. UI 美化库 (ttkbootstrap) ---
+try:
+    import ttkbootstrap as ttk
+    from ttkbootstrap.constants import *
+    HAS_BOOTSTRAP = True
+except ImportError:
+    import tkinter.ttk as ttk
+    HAS_BOOTSTRAP = False
+
+# --- 2. OpenCV (视频处理) ---
+try:
+    import cv2
+    import numpy as np
+    HAS_OPENCV = True
+except ImportError:
+    HAS_OPENCV = False
+
+class WebPConverterApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("WebP 格式工厂 (macOS版)")
+        self.root.geometry("950x650")
+        
+        # --- macOS Retina 屏幕适配尝试 ---
+        # 如果在高分屏上字体模糊，可以尝试启用这行代码，或者调整缩放因子
+        # try:
+        #     self.root.tk.call('tk', 'scaling', 2.0)
+        # except:
+        #     pass
+
+        # 应用主题
+        if HAS_BOOTSTRAP:
+            # "cosmo" 主题在 Mac 上通常表现较好
+            self.style = ttk.Style(theme="cosmo") 
+
+        # --- 变量初始化 ---
+        self.vars = {
+            "batch_path": tk.StringVar(),
+            "file_list": [],
+            "opt_gif": tk.BooleanVar(value=True),
+            "opt_mp4": tk.BooleanVar(value=False),
+            "opt_png": tk.BooleanVar(value=True),
+            "opt_backup": tk.BooleanVar(value=True),
+            "progress_val": tk.DoubleVar(value=0),
+            "status_text": tk.StringVar(value="准备就绪")
+        }
+        self.current_output_folder = ""
+        self.system_os = platform.system() # 获取系统类型 (Windows/Darwin/Linux)
+
+        self.setup_ui()
+        self.log(f"✅ 程序启动成功 (当前系统: {self.system_os})")
+        self.log("ℹ️ 请使用“浏览”或“添加文件”按钮选择图片")
+
+    def setup_ui(self):
+        # ================== 主布局容器 ==================
+        sidebar = ttk.Frame(self.root, padding=10, width=250)
+        sidebar.pack(side="left", fill="y")
+        
+        ttk.Separator(self.root, orient="vertical").pack(side="left", fill="y", padx=2)
+
+        content = ttk.Frame(self.root, padding=10)
+        content.pack(side="right", fill="both", expand=True)
+
+        # ================== 1. 左侧侧边栏 ==================
+        
+        # Mac字体适配：优先尝试 Mac 原生字体，没有则回退
+        title_font = ("PingFang SC", 14, "bold") if self.system_os == "Darwin" else ("微软雅黑", 14, "bold")
+        normal_font = ("PingFang SC", 10) if self.system_os == "Darwin" else ("微软雅黑", 9)
+        
+        lbl_title = ttk.Label(sidebar, text="⚙️ 设置面板", font=title_font, bootstyle="primary")
+        lbl_title.pack(anchor="w", pady=(0, 20))
+
+        # 1.2 转换选项
+        opt_group = ttk.Labelframe(sidebar, text="转换目标格式", padding=10, bootstyle="info")
+        opt_group.pack(fill="x", pady=(0, 20))
+
+        chk_style = "round-toggle" if HAS_BOOTSTRAP else ""
+        
+        ttk.Checkbutton(opt_group, text="GIF 动图", variable=self.vars["opt_gif"], bootstyle=f"success-{chk_style}").pack(anchor="w", pady=5)
+        
+        mp4_text = "MP4 视频" if HAS_OPENCV else "MP4 (未安装OpenCV)"
+        mp4_state = "normal" if HAS_OPENCV else "disabled"
+        ttk.Checkbutton(opt_group, text=mp4_text, variable=self.vars["opt_mp4"], state=mp4_state, bootstyle=f"primary-{chk_style}").pack(anchor="w", pady=5)
+        
+        ttk.Checkbutton(opt_group, text="PNG 序列/图片", variable=self.vars["opt_png"], bootstyle=f"warning-{chk_style}").pack(anchor="w", pady=5)
+        
+        ttk.Separator(opt_group, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Checkbutton(opt_group, text="保留源文件备份", variable=self.vars["opt_backup"], bootstyle=f"secondary-{chk_style}").pack(anchor="w", pady=5)
+
+        # 1.3 进度条
+        progress_group = ttk.Labelframe(sidebar, text="执行进度", padding=10)
+        progress_group.pack(fill="x", pady=(0, 20))
+        
+        self.progressbar = ttk.Progressbar(progress_group, variable=self.vars["progress_val"], maximum=100, bootstyle="success-striped")
+        self.progressbar.pack(fill="x", pady=(0, 5))
+        
+        ttk.Label(progress_group, textvariable=self.vars["status_text"], font=normal_font, foreground="#555", wraplength=200).pack(anchor="w")
+
+        # 1.4 日志
+        log_group = ttk.Labelframe(sidebar, text="系统日志", padding=5)
+        log_group.pack(fill="both", expand=True, pady=(0, 20))
+        
+        # Mac上的 Consolas 可能不可用，改为 Menlo 或 Monaco
+        log_font = ("Menlo", 10) if self.system_os == "Darwin" else ("Consolas", 8)
+        self.txt_log = scrolledtext.ScrolledText(log_group, width=25, height=5, state='disabled', 
+                                                 font=log_font, relief="flat", bg="#f4f6f9")
+        self.txt_log.pack(fill="both", expand=True)
+
+        # 1.5 底部大按钮
+        self.btn_open = ttk.Button(sidebar, text="📂 打开输出文件夹", command=self.open_output_folder, state="disabled", bootstyle="outline-primary")
+        self.btn_open.pack(fill="x", pady=5)
+
+        # ================== 2. 右侧内容区 ==================
+        
+        self.notebook = ttk.Notebook(content, bootstyle="default")
+        self.notebook.pack(expand=True, fill="both")
+
+        self.tab_batch = ttk.Frame(self.notebook, padding=30)
+        self.tab_multi = ttk.Frame(self.notebook, padding=20)
+        
+        self.notebook.add(self.tab_batch, text=" 📂 文件夹批量模式 ")
+        self.notebook.add(self.tab_multi, text=" 📄 多文件列表模式 ")
+
+        self.setup_batch_ui(self.tab_batch)
+        self.setup_multi_ui(self.tab_multi)
+
+    def setup_batch_ui(self, parent):
+        ui_font = ("PingFang SC", 10) if self.system_os == "Darwin" else ("微软雅黑", 10)
+        header_font = ("PingFang SC", 16, "bold") if self.system_os == "Darwin" else ("微软雅黑", 16, "bold")
+
+        card = ttk.Frame(parent)
+        card.place(relx=0.5, rely=0.4, anchor="center", relwidth=0.9)
+        
+        ttk.Label(card, text="批量处理文件夹", font=header_font, foreground="#333").pack(pady=(0,20))
+        ttk.Label(card, text="请选择包含 .webp 文件的文件夹，程序将自动处理所有图片。", font=ui_font, foreground="#666").pack(pady=(0,30))
+        
+        input_group = ttk.Frame(card)
+        input_group.pack(fill="x", padx=20)
+        
+        ttk.Entry(input_group, textvariable=self.vars["batch_path"], font=ui_font).pack(side="left", fill="x", expand=True, padx=(0, 10))
+        ttk.Button(input_group, text="浏览文件夹...", command=self.select_batch_folder, bootstyle="secondary").pack(side="right")
+        
+        ttk.Button(card, text="🚀 开始批量转换", command=lambda: self.start_thread("batch"), 
+                   bootstyle="success", width=30).pack(pady=40)
+
+    def setup_multi_ui(self, parent):
+        list_font = ("PingFang SC", 11) if self.system_os == "Darwin" else ("微软雅黑", 10)
+
+        top_bar = ttk.Frame(parent)
+        top_bar.pack(fill="x", pady=(0, 10))
+        
+        ttk.Button(top_bar, text="➕ 添加 WebP 文件", command=self.select_multi_files, bootstyle="primary").pack(side="left")
+        ttk.Button(top_bar, text="🗑️ 清空列表", command=self.clear_file_list, bootstyle="danger-outline").pack(side="right")
+        
+        # 列表区域
+        list_frame = ttk.Frame(parent, padding=1, bootstyle="secondary")
+        list_frame.pack(fill="both", expand=True)
+        
+        self.lst_files = tk.Listbox(list_frame, selectmode="extended", 
+                                    relief="flat", highlightthickness=0, font=list_font, bg="#ffffff")
+        self.lst_files.pack(fill="both", expand=True, padx=1, pady=1)
+        
+        ttk.Button(parent, text="🚀 开始列表转换", command=lambda: self.start_thread("multi"), 
+                   bootstyle="primary", width=30).pack(pady=15)
+
+    # --- 逻辑功能 ---
+
+    def log(self, message):
+        self.txt_log.config(state='normal')
+        self.txt_log.insert(tk.END, message + "\n")
+        self.txt_log.see(tk.END)
+        self.txt_log.config(state='disabled')
+
+    def update_status(self, text, progress=None):
+        self.vars["status_text"].set(text)
+        if progress is not None:
+            self.vars["progress_val"].set(progress)
+        self.root.update_idletasks()
+
+    def select_batch_folder(self):
+        path = filedialog.askdirectory()
+        if path: self.vars["batch_path"].set(path)
+
+    def select_multi_files(self):
+        files = filedialog.askopenfilenames(filetypes=[("WebP Image", "*.webp")])
+        if files:
+            for f in files:
+                if f not in self.vars["file_list"]:
+                    self.vars["file_list"].append(f)
+                    self.lst_files.insert(tk.END, f)
+            self.notebook.select(self.tab_multi)
+
+    def clear_file_list(self):
+        self.vars["file_list"] = []
+        self.lst_files.delete(0, tk.END)
+
+    def start_thread(self, mode):
+        tasks = []
+        if mode == "batch":
+            folder = self.vars["batch_path"].get()
+            if not folder or not os.path.exists(folder):
+                messagebox.showerror("错误", "请选择有效的文件夹")
+                return
+            out_root = os.path.join(folder, "Output_Fixed")
+            try:
+                tasks = [{"src": os.path.join(folder, f), "root": out_root} 
+                        for f in os.listdir(folder) if f.lower().endswith('.webp')]
+            except Exception as e:
+                messagebox.showerror("错误", f"读取文件夹失败: {e}")
+                return
+
+        elif mode == "multi":
+            files = self.vars["file_list"]
+            if not files:
+                messagebox.showerror("错误", "列表为空")
+                return
+            out_root = os.path.join(os.path.dirname(files[0]), "Output_Fixed")
+            tasks = [{"src": f, "root": out_root} for f in files]
+
+        if not tasks:
+            self.log("⚠️ 没有找到 .webp 文件")
+            return
+
+        self.current_output_folder = out_root
+        self.btn_open.config(state="disabled")
+        threading.Thread(target=self.process_tasks, args=(tasks,)).start()
+
+    def process_tasks(self, tasks):
+        total = len(tasks)
+        if not os.path.exists(self.current_output_folder):
+            os.makedirs(self.current_output_folder)
+
+        self.log(f"🚀 开始处理 {total} 个任务...")
+        self.update_status(f"初始化...", 0)
+
+        do_gif = self.vars["opt_gif"].get()
+        do_mp4 = self.vars["opt_mp4"].get() and HAS_OPENCV
+        do_png = self.vars["opt_png"].get()
+        do_backup = self.vars["opt_backup"].get()
+
+        for i, task in enumerate(tasks):
+            src = task["src"]
+            root = task["root"]
+            fname = os.path.basename(src)
+            name_no_ext = os.path.splitext(fname)[0]
+            
+            progress_percent = ((i) / total) * 100
+            self.update_status(f"正在处理: {fname}", progress_percent)
+            self.log(f"[{i+1}/{total}] {fname}")
+
+            save_dir = os.path.join(root, name_no_ext)
+            if not os.path.exists(save_dir): os.makedirs(save_dir)
+
+            try:
+                with Image.open(src) as im:
+                    frames = []
+                    try:
+                        while True:
+                            frames.append(im.convert("RGBA").copy())
+                            im.seek(im.tell() + 1)
+                    except EOFError: pass
+                    
+                    is_anim = len(frames) > 1
+                    duration = im.info.get('duration', 100)
+                    if duration <= 0: duration = 100 
+
+                    # 1. 备份
+                    if do_backup:
+                        shutil.copy2(src, os.path.join(save_dir, fname))
+
+                    # 2. 转 GIF
+                    if do_gif and is_anim:
+                        gif_path = os.path.join(save_dir, f"{name_no_ext}.gif")
+                        frames[0].save(gif_path, save_all=True, append_images=frames[1:],
+                                       optimize=False, duration=duration, loop=0, disposal=2)
+
+                    # 3. 转 MP4 (需要 OpenCV)
+                    if do_mp4 and is_anim and HAS_OPENCV:
+                        try:
+                            mp4_path = os.path.join(save_dir, f"{name_no_ext}.mp4")
+                            h, w = frames[0].size[1], frames[0].size[0]
+                            fps = 1000.0 / max(duration, 20)
+                            # MacOS下 mp4v 通常可用，但也可能需要 avc1。这里保持 mp4v 兼容性较高。
+                            video = cv2.VideoWriter(mp4_path, cv2.VideoWriter_fourcc(*'mp4v'), 
+                                                    fps, (w, h))
+                            for f in frames:
+                                img_np = np.array(f)
+                                img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+                                video.write(img_bgr)
+                            video.release()
+                        except Exception as e_mp4:
+                            self.log(f"  └─ MP4失败: {e_mp4}")
+
+                    # 4. 转 PNG
+                    if do_png:
+                        if is_anim:
+                            for idx, f in enumerate(frames):
+                                f.save(os.path.join(save_dir, f"frame_{idx:03d}.png"))
+                        else:
+                            frames[0].save(os.path.join(save_dir, f"{name_no_ext}.png"))
+
+            except Exception as e:
+                self.log(f"❌ 文件错误: {e}")
+
+        self.update_status("✅ 所有任务完成", 100)
+        self.log("\n✨ 全部转换结束！")
+        
+        # 这里的 lambda 防止界面卡死，使用 after 调度
+        self.root.after(0, lambda: self.btn_open.config(state="normal", bootstyle="primary"))
+        self.root.after(0, lambda: messagebox.showinfo("完成", f"已处理 {total} 个文件"))
+
+    # ================= 兼容性修改的核心部分 =================
+    def open_output_folder(self):
+        """跨平台打开文件夹逻辑"""
+        path = self.current_output_folder
+        if not os.path.exists(path):
+            return
+
+        try:
+            if self.system_os == "Windows":
+                os.startfile(path)
+            elif self.system_os == "Darwin":  # macOS
+                subprocess.call(["open", path])
+            else:  # Linux (Ubuntu/Debian等)
+                subprocess.call(["xdg-open", path])
+        except Exception as e:
+            self.log(f"❌ 无法打开文件夹: {e}")
+            messagebox.showwarning("提示", f"已完成，但无法自动打开文件夹。\n路径：{path}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = WebPConverterApp(root)
+    root.mainloop()
