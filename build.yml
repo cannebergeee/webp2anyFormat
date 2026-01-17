@@ -21,7 +21,7 @@ jobs:
     - name: Build with PyInstaller
       run: |
         # 打包命令：生成 .app，不显示控制台窗口
-        pyinstaller --noconfirm --onedir --windowed --clean --name "WebPConverter" webp_tool.py
+        pyinstaller --noconfirm --onedir --windowed --clean --name "WebPConverter" webp_tools_for_mac.py
 
     - name: Zip the App
       run: |
