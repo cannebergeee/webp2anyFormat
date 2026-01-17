@@ -1,13 +1,14 @@
-WebP 格式转换工具 (WebP Converter)
-一个简单的 Python 桌面工具，用于将 WebP 图片（支持动图）批量转换为 GIF、MP4 或 PNG 格式。
+# WebP 格式转换工具 (WebP Converter)
+
+一个简单的 Python 桌面工具，用于将 WebP 图片（支持动图）批量转换为 **GIF**、**MP4** 或 **PNG** 格式。
 
 适配 macOS 和 Windows，支持批量处理。
 
-📦 安装依赖
+## 📦 安装依赖
+
 复制以下命令在终端运行，安装必要的库：
 
-Bash
-
+```bash
 pip install Pillow ttkbootstrap opencv-python
 注：如果不转换视频，可以不安装 opencv-python。
 
