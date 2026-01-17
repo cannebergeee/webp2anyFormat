@@ -1,0 +1,36 @@
+name: Build Mac App
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: macos-latest  # 指定使用 macOS 系统运行
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Build with PyInstaller
+      run: |
+        # 打包命令：生成 .app，不显示控制台窗口
+        pyinstaller --noconfirm --onedir --windowed --clean --name "WebPConverter" webp_tool.py
+
+    - name: Zip the App
+      run: |
+        # macOS 的 .app 其实是文件夹，必须压缩才能下载
+        cd dist
+        zip -r WebPConverter_Mac.zip WebPConverter.app
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Mac_App_Download_Here
+        path: dist/WebPConverter_Mac.zip
